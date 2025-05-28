@@ -7687,8 +7687,102 @@ omrsysinfo_get_processes(struct OMRPortLibrary *portLibrary, OMRProcessInfoCallb
 	portLibrary->mem_free_memory(portLibrary, command);
 	closedir(dir);
 	return callback_result;
-#else /* defined(LINUX) */
-	/* sysinfo_get_processes is not supported on this platform. */
+#elif defined(AIXPPC) /* defined(LINUX) */
+#define MAX_PROCS 256
+#define INITIAL_ARGS_SIZE 8192
+	struct procentry64 procs[MAX_PROCS];
+	pid_t index = 0;
+	int32_t numProcs = 0;
+	uintptr_t callback_result = 0;
+	for (;;) {
+		numProcs = getprocs64(procs, sizeof(struct procentry64), NULL, 0, &index, MAX_PROCS);
+		if (-1 == numProcs) {
+			int32_t rc = findError(errno);
+			portLibrary->error_set_last_error(portLibrary, errno, rc);
+			Trc_PRT_failed_to_getprocs64(rc);
+			return (uintptr_t)(intptr_t)rc;
+		}
+		if (0 == numProcs) {
+			break;
+		}
+		for (int32_t i = 0; i < numProcs; i++) {
+			size_t argsSize = INITIAL_ARGS_SIZE;
+			char *args = (char *)portLibrary->mem_allocate_memory(
+				portLibrary,
+				argsSize,
+				OMR_GET_CALLSITE(),
+				OMRMEM_CATEGORY_PORT_LIBRARY);
+			if (NULL == args) {
+				return OMRPORT_ERROR_SYSINFO_MEMORY_ALLOC_FAILED;
+			}
+			memset(args, 0, argsSize);
+			struct procentry64 pe;
+			memset(&pe, 0, sizeof(pe));
+			pe.pi_pid = procs[i].pi_pid;
+
+			int32_t getargsResult = getargs(&pe, sizeof(pe), args, argsSize);
+			uintptr_t foundArgs = 0;
+			if (0 == getargsResult) {
+				for (;;) {
+					uintptr_t foundDoubleNull = 0;
+					size_t scanLimit = argsSize - 1;
+
+					for (size_t idx = 0; idx < scanLimit; idx++) {
+						if ('\0' == args[idx]) {
+							if ('\0' == args[idx + 1]) {
+								foundDoubleNull = 1;
+								break;
+							}
+							args[idx] = ' ';
+						}
+					}
+
+					if (foundDoubleNull) {
+						if ('\0' != args[0]) {
+							printf("PID: %lu CMD: %s\n", (unsigned long)procs[i].pi_pid, args);
+							callback_result = callback((uintptr_t)procs[i].pi_pid, args, userData);
+							foundArgs = 1;
+						}
+						break;
+					}
+
+					size_t newSize = argsSize * 2;
+					char *newArgs = (char *)portLibrary->mem_reallocate_memory(
+						portLibrary,
+						args,
+						newSize,
+						OMR_GET_CALLSITE(),
+						OMRMEM_CATEGORY_PORT_LIBRARY);
+					if (NULL == newArgs) {
+						break;
+					}
+					args = newArgs;
+					memset(args + argsSize, 0, newSize - argsSize);
+					argsSize = newSize;
+
+					getargsResult = getargs(&pe, sizeof(pe), args, argsSize);
+					if (0 != getargsResult) {
+						break;
+					}
+				}
+			}
+
+			if (!foundArgs && '\0' != procs[i].pi_comm[0]) {
+				printf("PID: %lu CMD: %s\n", (unsigned long)procs[i].pi_pid, procs[i].pi_comm);
+				callback_result = callback((uintptr_t)procs[i].pi_pid, procs[i].pi_comm, userData);
+			}
+
+			portLibrary->mem_free_memory(portLibrary, args);
+			if (0 != callback_result) {
+				break;
+			}
+		}
+		if (0 != callback_result) {
+			break;
+		}
+	}
+	return callback_result;
+#else /* defined(AIXPPC) */
 	return OMRPORT_ERROR_SYSINFO_NOT_SUPPORTED;
-#endif /* defined(LINUX) */
+#endif /* defined(AIXPPC) */
 }
